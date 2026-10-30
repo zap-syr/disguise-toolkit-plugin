@@ -86,7 +86,8 @@ defineEmits(['select'])
   text-overflow: ellipsis;
 }
 
-@media (max-width: 760px) {
+/* Icons only below 1100px, so the default 960px window keeps room for the tool. */
+@media (max-width: 1100px) {
   .tool-rail {
     width: 48px;
   }

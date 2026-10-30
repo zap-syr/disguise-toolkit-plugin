@@ -58,7 +58,7 @@ function onRefresh() {
       <dl class="track-stats">
         <div><dt>Sections</dt><dd>{{ info.sections }}</dd></div>
         <div><dt>Cues</dt><dd>{{ info.cues }}</dd></div>
-        <div><dt>Playhead</dt><dd>{{ info.playhead }}</dd></div>
+        <div class="optional-narrow"><dt>Playhead</dt><dd>{{ info.playhead }}</dd></div>
         <div class="optional"><dt>Selected</dt><dd>{{ info.selection }}</dd></div>
       </dl>
       <span v-if="error" class="stale" :title="error">not updated</span>
@@ -183,8 +183,14 @@ function onRefresh() {
   .track-picker {
     width: 180px;
   }
-  .optional,
+  .track-stats .optional,
   .refresh-label {
+    display: none;
+  }
+}
+/* Minimum window: track picker, section and cue counts, refresh. */
+@container (max-width: 600px) {
+  .track-stats .optional-narrow {
     display: none;
   }
 }

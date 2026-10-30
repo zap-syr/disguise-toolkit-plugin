@@ -20,6 +20,13 @@ const { show: showToast } = useToast()
 const settings = useToolSettings('cue-tagger', DEFAULT_SETTINGS)
 const applying = ref(false)
 
+// Narrow windows show one pane at a time; the switch is visible only there (container query).
+const pane = ref('settings')
+const paneOptions = computed(() => [
+  { value: 'settings', label: 'Settings' },
+  { value: 'preview', label: plan.value.rows.length ? `Preview (${plan.value.rows.length})` : 'Preview' },
+])
+
 // Playhead and layer selection exist only for the track open in the Designer timeline.
 const isGuiTrack = computed(() => !!snapshot.value?.track?.isGui)
 const GUI_ONLY = 'Only for the track open in the timeline'
@@ -82,7 +89,7 @@ function toggleRow(row, included, event) {
   lastToggled = row.beat
 }
 
-const allIncluded = computed(() => toggleableRows.value.every((r) => r.action !== 'off'))
+const allIncluded = computed(() => toggleableRows.value.length > 0 && toggleableRows.value.every((r) => r.action !== 'off'))
 const someIncluded = computed(() => toggleableRows.value.some((r) => r.action !== 'off'))
 // With any section off, the first click turns all of them back on.
 function toggleAll() {
@@ -247,7 +254,11 @@ async function apply() {
 </script>
 
 <template>
-  <div class="cue-tagger">
+  <div class="cue-tagger" :class="{ 'show-preview': pane === 'preview' }">
+    <div class="pane-switch">
+      <SegmentedControl v-model="pane" :options="paneOptions" />
+    </div>
+
     <aside class="settings scrollable">
       <SettingsGroup title="Range">
         <SegmentedControl v-model="settings.rangeMode" :options="rangeOptions" :columns="2" />
@@ -320,6 +331,7 @@ async function apply() {
                 <CheckBox
                   :model-value="allIncluded"
                   :partial="someIncluded"
+                  :disabled="!toggleableRows.length"
                   aria-label="Include all sections"
                   title="Include or exclude all sections"
                   @toggle="toggleAll"
@@ -327,7 +339,7 @@ async function apply() {
               </th>
               <th class="num">Section</th>
               <th class="col-time">Time</th>
-              <th class="col-time">Current</th>
+              <th class="col-time col-current">Current</th>
               <th>New cue</th>
               <th class="col-action">Action</th>
             </tr>
@@ -400,26 +412,27 @@ async function apply() {
           <template v-else>Nothing to create</template>
         </div>
       </div>
-
-      <footer class="action-bar">
-        <div class="status">
-          <span v-if="plan.errors.length && plan.rows.length" class="status-error">{{ plan.errors[0] }}</span>
-          <template v-else-if="plan.rows.length">
-            <span>New: <b>{{ counts.create }}</b></span>
-            <span v-if="counts.overwrite">Replace: <b>{{ counts.overwrite }}</b></span>
-            <span v-if="counts.skip">Skip: <b>{{ counts.skip }}</b></span>
-            <span v-if="counts.off">Off: <b>{{ counts.off }}</b></span>
-            <span v-if="counts.custom" class="status-warn">Custom: {{ counts.custom }}</span>
-            <span v-if="counts.duplicates" class="status-warn">Duplicates: {{ counts.duplicates }}</span>
-          </template>
-          <button v-if="hasEdits" type="button" class="link-btn" title="Include all sections and drop custom cues" @click="resetEdits">Reset edits</button>
-          <span v-for="note in plan.notes" :key="note" class="status-note">{{ note }}</span>
-        </div>
-        <button type="button" class="btn-primary" :disabled="!canApply" @click="apply">
-          {{ applying ? 'Writing...' : toWrite ? `Create tags (${toWrite})` : 'Create tags' }}
-        </button>
-      </footer>
     </section>
+
+    <footer class="action-bar">
+      <!-- Errors show here too: in a narrow window the preview with its message may be hidden. -->
+      <div class="status">
+        <span v-if="plan.errors.length" class="status-error" :title="plan.errors[0]">{{ plan.errors[0] }}</span>
+        <template v-else-if="plan.rows.length">
+          <span>New: <b>{{ counts.create }}</b></span>
+          <span v-if="counts.overwrite">Replace: <b>{{ counts.overwrite }}</b></span>
+          <span v-if="counts.skip">Skip: <b>{{ counts.skip }}</b></span>
+          <span v-if="counts.off">Off: <b>{{ counts.off }}</b></span>
+          <span v-if="counts.custom" class="status-warn">Custom: {{ counts.custom }}</span>
+          <span v-if="counts.duplicates" class="status-warn">Duplicates: {{ counts.duplicates }}</span>
+        </template>
+        <button v-if="hasEdits" type="button" class="link-btn" title="Include all sections and drop custom cues" @click="resetEdits">Reset edits</button>
+        <span v-for="note in plan.notes" :key="note" class="status-note">{{ note }}</span>
+      </div>
+      <button type="button" class="btn-primary" :disabled="!canApply" @click="apply">
+        {{ applying ? 'Writing...' : toWrite ? `Create tags (${toWrite})` : 'Create tags' }}
+      </button>
+    </footer>
   </div>
 </template>
 
@@ -427,13 +440,27 @@ async function apply() {
 /* The container is the tool host in App.vue. */
 .cue-tagger {
   display: grid;
-  grid-template-columns: minmax(280px, 320px) 1fr;
+  /* minmax(0, 1fr), not 1fr: a long status line must truncate, not widen the column. */
+  grid-template-columns: minmax(280px, 320px) minmax(0, 1fr);
+  grid-template-rows: 1fr auto;
+  grid-template-areas:
+    'settings preview'
+    'settings bar';
   height: 100%;
   min-height: 0;
+}
+.pane-switch {
+  display: none;
+  grid-area: switch;
+  padding: 8px 12px;
+  background: #1a1a1a;
+  border-bottom: 1px solid #2a2a2a;
 }
 
 /* --- Settings column --- */
 .settings {
+  grid-area: settings;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -499,6 +526,8 @@ async function apply() {
 
 /* --- Preview column --- */
 .preview {
+  grid-area: preview;
+  container: preview / inline-size;
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -713,6 +742,7 @@ tr:hover .icon-btn.reset,
 
 /* --- Action bar --- */
 .action-bar {
+  grid-area: bar;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -807,16 +837,51 @@ tr:hover .icon-btn.reset,
   background: #555555;
 }
 
-@container (max-width: 620px) {
+/* Narrow preview pane: compact columns leave New cue at least ~100px. */
+@container preview (max-width: 600px) {
+  .table-wrap {
+    padding: 0 8px 8px;
+  }
+  .col-time {
+    width: 92px;
+  }
+  .col-current {
+    width: 72px;
+  }
+  .col-action {
+    width: 86px;
+  }
+}
+
+/* Narrow window (down to the 560x420 minimum): one pane at a time, the action bar stays pinned. */
+@container (max-width: 800px) {
   .cue-tagger {
-    grid-template-columns: 1fr;
-    grid-template-rows: auto 1fr;
-    overflow-y: auto;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto 1fr auto;
+    grid-template-areas:
+      'switch'
+      'pane'
+      'bar';
+  }
+  .pane-switch {
+    display: block;
+  }
+  .settings,
+  .preview {
+    grid-area: pane;
   }
   .settings {
     border-right: none;
-    border-bottom: 1px solid #2a2a2a;
-    overflow: visible;
+  }
+  .cue-tagger.show-preview .settings,
+  .cue-tagger:not(.show-preview) .preview {
+    display: none;
+  }
+  .preview-head {
+    padding-top: 8px;
+  }
+  .action-bar {
+    padding: 0 12px;
   }
 }
 </style>

@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import TextField from '../../components/ui/TextField.vue'
 import CheckBox from '../../components/ui/CheckBox.vue'
 import NumberStepper from '../../components/ui/NumberStepper.vue'
@@ -103,6 +103,110 @@ function toggleRow(row, value, event) {
     else delete s[rows[i].key]
   }
   lastToggled = row.key
+}
+
+// Drag over the checkboxes: the first row sets the mode (select or clear) and every row between it
+// and the row under the pointer follows, so a fast move skips nothing and moving back shrinks the
+// range. Near the list edges it scrolls. The row is found by position on every frame, because rows
+// scrolling under a still pointer fire no pointer events.
+const tableWrap = ref(null)
+let drag = null // { mode, from, base, last, x, y, t }
+let dragFrame = 0
+const DRAG_EDGE = 36
+
+function onCheckDown(row, event) {
+  if (event.button !== 0) return
+  // No focus or text selection while dragging; the checkbox click that follows is ignored.
+  event.preventDefault()
+  if (event.shiftKey) {
+    toggleRow(row, !selected.value[row.key], event)
+    return
+  }
+  drag = {
+    mode: !selected.value[row.key],
+    from: visibleRows.value.indexOf(row),
+    base: { ...selected.value },
+    last: null,
+    x: event.clientX,
+    y: event.clientY,
+  }
+  dragTo(row.key)
+  window.addEventListener('pointermove', onDragMove)
+  window.addEventListener('pointerup', endDrag)
+  window.addEventListener('pointercancel', endDrag)
+  window.addEventListener('blur', endDrag)
+  dragFrame = requestAnimationFrame(dragTick)
+}
+
+// Hit-tests right away too: a quick flick can end before the next frame.
+function onDragMove(event) {
+  drag.y = event.clientY
+  dragHitTest()
+}
+
+function dragTo(key) {
+  const rows = visibleRows.value
+  const to = rows.findIndex((r) => r.key === key)
+  if (to < 0) return
+  const s = editableSelection()
+  for (const k of Object.keys(s)) if (!drag.base[k]) delete s[k]
+  for (const k of Object.keys(drag.base)) s[k] = true
+  for (let i = Math.min(drag.from, to); i <= Math.max(drag.from, to); i++) {
+    if (drag.mode) s[rows[i].key] = true
+    else delete s[rows[i].key]
+  }
+  drag.last = key
+}
+
+// The visible part of the list body: below the sticky header, above the floating selection bar.
+function listBounds(wrap) {
+  const box = wrap.getBoundingClientRect()
+  return {
+    top: box.top + (wrap.querySelector('thead')?.offsetHeight ?? 0),
+    bottom: box.bottom - (selectedRows.value.length ? 64 : 0),
+  }
+}
+
+function dragHitTest() {
+  const wrap = tableWrap.value
+  if (!drag || !wrap) return
+  const { top, bottom } = listBounds(wrap)
+  const y = Math.min(Math.max(drag.y, top + 1), bottom - 1)
+  const tr = document.elementFromPoint(drag.x, y)?.closest('tr[data-key]')
+  if (tr && tr.dataset.key !== drag.last) dragTo(tr.dataset.key)
+}
+
+// Scroll speed grows with the depth into the edge zone, up to ~1.5 px/ms. It is time-based, so a
+// low frame rate does not slow it down; long frames are capped so the list never jumps far.
+function dragTick(now) {
+  if (!drag) return
+  const wrap = tableWrap.value
+  const dt = Math.min(100, drag.t ? now - drag.t : 16)
+  drag.t = now
+  if (wrap) {
+    const { top, bottom } = listBounds(wrap)
+    const depth = drag.y < top + DRAG_EDGE ? drag.y - top - DRAG_EDGE : drag.y > bottom - DRAG_EDGE ? drag.y - bottom + DRAG_EDGE : 0
+    if (depth) wrap.scrollTop += Math.sign(depth) * Math.min(1.5, Math.abs(depth) / 48) * dt
+    dragHitTest()
+  }
+  dragFrame = requestAnimationFrame(dragTick)
+}
+
+function endDrag() {
+  cancelAnimationFrame(dragFrame)
+  window.removeEventListener('pointermove', onDragMove)
+  window.removeEventListener('pointerup', endDrag)
+  window.removeEventListener('pointercancel', endDrag)
+  window.removeEventListener('blur', endDrag)
+  if (drag) lastToggled = drag.last
+  drag = null
+}
+
+onBeforeUnmount(endDrag)
+
+// Mouse clicks are handled on pointerdown; this keeps Space / Enter on a focused checkbox working.
+function onCheckToggle(row, value, event) {
+  if (event.detail === 0) toggleRow(row, value, event)
 }
 
 const allSelected = computed(() => visibleRows.value.length > 0 && selectedRows.value.length === visibleRows.value.length)
@@ -324,7 +428,7 @@ async function apply() {
       <span v-if="snapshot?.track" class="count">{{ counts.notes }} notes</span>
     </div>
 
-    <div class="table-wrap scrollable" :class="{ 'has-bar': selectedRows.length }">
+    <div ref="tableWrap" class="table-wrap scrollable" :class="{ 'has-bar': selectedRows.length }">
       <table v-if="visibleRows.length" class="note-table">
         <thead>
           <tr>
@@ -345,13 +449,13 @@ async function apply() {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="row in visibleRows" :key="row.key" :class="[row.action, { selected: selected[row.key] }]">
-            <td class="check">
+          <tr v-for="row in visibleRows" :key="row.key" :data-key="row.key" :class="[row.action, { selected: selected[row.key] }]">
+            <td class="check" @pointerdown="onCheckDown(row, $event)">
               <CheckBox
                 :model-value="!!selected[row.key]"
                 :aria-label="`Select the row at ${tc(row.seconds)}`"
-                title="Select. Shift+click for a range"
-                @toggle="(value, event) => toggleRow(row, value, event)"
+                title="Select. Drag over the boxes or Shift+click for a range"
+                @toggle="(value, event) => onCheckToggle(row, value, event)"
               />
             </td>
             <td class="num">{{ row.atSectionStart ? row.section : '' }}</td>
@@ -651,6 +755,11 @@ async function apply() {
 .note-table .check {
   width: 36px;
   padding: 0 4px 0 10px;
+}
+/* The whole cell starts a drag selection, not only the 16px box. */
+.note-table td.check {
+  cursor: pointer;
+  user-select: none;
 }
 .check > * {
   vertical-align: middle;

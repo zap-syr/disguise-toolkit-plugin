@@ -3,8 +3,8 @@ import { runScript, pyString } from './disguiseService.js'
 // Bounds for loops in Designer scripts: a script runs on the main thread and must never be unbounded.
 const MAX_TAG_WALK = 20000
 
-// Snapshot of one track: sections, cue tags, and (for the track open in the timeline) playhead and
-// selection. Also lists all project tracks for the track picker.
+// Snapshot of one track: sections, cue tags, notes, and (for the track open in the timeline) playhead
+// and selection. Also lists all project tracks for the track picker.
 // trackPath '' means the track open in the timeline. Shared by all tools.
 // selection: the time range selected on the timeline ruler, or else the extents of the selected
 // layers: { source: 'timeline' | 'layers', startBeat, endBeat, count? } or null.
@@ -106,6 +106,16 @@ def run():
         if current_tag:
             current_cues.append({"beat": b, "text": current_tag.text})
 
+    # Notes can sit on any beat, not only on section starts.
+    current_notes = []
+    b = -1.0
+    for _ in range(${MAX_TAG_WALK}):
+        nb = current_track.findBeatOfNextNote(b)
+        if nb > 1e300 or nb <= b:
+            break
+        b = nb
+        current_notes.append({"beat": b, "seconds": current_track.beatToTime(b), "text": current_track.noteAtBeat(b)})
+
     # Playhead and layer selection only exist for the track open in the timeline.
     layer_selection = None
     playhead_beat = None
@@ -135,6 +145,7 @@ def run():
         "playheadSeconds": current_track.beatToTime(playhead_beat) if is_gui else None,
         "sections": current_sections,
         "cues": current_cues,
+        "notes": current_notes,
         "layerSelection": layer_selection,
     })
     return result

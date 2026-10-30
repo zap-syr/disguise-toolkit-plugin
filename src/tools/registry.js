@@ -10,6 +10,13 @@ export const tools = [
     icon: 'M5 4h10l4 4v12H5z M9 10h6 M9 14h6 M9 18h3',
     component: defineAsyncComponent(() => import('./cue-tagger/CueTaggerTool.vue')),
   },
+  {
+    id: 'note-editor',
+    title: 'Note Editor',
+    description: 'Create and edit timeline notes',
+    icon: 'M4 5h16v11H9l-5 4z M8 9h8 M8 12h5',
+    component: defineAsyncComponent(() => import('./note-editor/NoteEditorTool.vue')),
+  },
 ]
 
 export function findTool(id) {

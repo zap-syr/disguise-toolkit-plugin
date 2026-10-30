@@ -32,7 +32,13 @@ const info = computed(() => {
     playhead: t.isGui
       ? `${formatTimecode(s.playheadSeconds, s.fps)}, section ${s.sections.length ? sectionIndexAt(s.sections, s.playheadBeat) + 1 : 0}`
       : 'not in timeline',
-    selection: !t.isGui ? '-' : s.selection ? `${s.selection.count} layers` : 'none',
+    selection: !t.isGui
+      ? '-'
+      : !s.selection
+        ? 'none'
+        : s.selection.source === 'timeline'
+          ? `range ${formatTimecode(s.selection.startSeconds, s.fps)} - ${formatTimecode(s.selection.endSeconds, s.fps)}`
+          : `${s.selection.count} layers`,
   }
 })
 

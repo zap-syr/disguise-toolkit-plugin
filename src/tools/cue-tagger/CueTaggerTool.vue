@@ -24,7 +24,7 @@ const isGuiTrack = computed(() => !!snapshot.value?.track?.isGui)
 const GUI_ONLY = 'Only for the track open in the timeline'
 
 const rangeOptions = computed(() => [
-  { value: 'selection', label: 'Selection', title: isGuiTrack.value ? 'From the start to the end of the selected layers' : GUI_ONLY, disabled: !isGuiTrack.value },
+  { value: 'selection', label: 'Selection', title: isGuiTrack.value ? 'The time range selected on the timeline, or else the extents of the selected layers' : GUI_ONLY, disabled: !isGuiTrack.value },
   { value: 'sections', label: 'Sections', title: 'A range of sections by number' },
   { value: 'playhead', label: 'From playhead', title: isGuiTrack.value ? 'From the section under the playhead to the end of the track' : GUI_ONLY, disabled: !isGuiTrack.value },
   { value: 'track', label: 'Whole track', title: 'All sections of the track' },
@@ -63,9 +63,8 @@ const rangeHint = computed(() => {
   }
   switch (settings.rangeMode) {
     case 'selection':
-      return s.selection
-        ? `${s.selection.count} layers: ${beatToTc(s.selection.startBeat)} - ${beatToTc(s.selection.endBeat)}`
-        : 'Select layers on the timeline and press Refresh'
+      if (!s.selection) return 'Select a time range or layers on the timeline and press Refresh'
+      return `${s.selection.source === 'timeline' ? 'Timeline range' : `${s.selection.count} layers`}: ${beatToTc(s.selection.startBeat)} - ${beatToTc(s.selection.endBeat)}`
     case 'playhead': {
       if (!s.sections.length) return ''
       const i = sectionIndexAt(s.sections, s.playheadBeat)

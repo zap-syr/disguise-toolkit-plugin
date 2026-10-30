@@ -30,7 +30,7 @@ export function resolveRange(snapshot, settings) {
 
     case 'selection':
       if (!track.isGui) return { error: 'Selection is only available for the track open in the timeline' }
-      if (!snapshot.selection) return { error: 'No layers selected in Designer' }
+      if (!snapshot.selection) return { error: 'No time range or layers selected in Designer' }
       return { startBeat: snapshot.selection.startBeat, endBeat: snapshot.selection.endBeat }
 
     case 'sections': {

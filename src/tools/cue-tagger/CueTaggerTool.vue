@@ -1,5 +1,6 @@
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, nextTick, reactive, ref } from 'vue'
+import CheckBox from '../../components/ui/CheckBox.vue'
 import SettingsGroup from '../../components/ui/SettingsGroup.vue'
 import SegmentedControl from '../../components/ui/SegmentedControl.vue'
 import FormRow from '../../components/ui/FormRow.vue'
@@ -10,7 +11,7 @@ import { useToolSettings } from '../../composables/useToolSettings.js'
 import { useToast } from '../../composables/useToast.js'
 import { formatTimecode } from '../../utils/timecode.js'
 import { sectionIndexAt } from '../../utils/sections.js'
-import { buildPlan, summarize, DEFAULT_SETTINGS } from './cuePlan.js'
+import { buildPlan, summarize, isWritten, DEFAULT_SETTINGS, NO_EDITS } from './cuePlan.js'
 import { parseCue, CUE_MAX_LENGTH } from './cueNumbers.js'
 import { writeCueTags } from './cueTaggerService.js'
 
@@ -43,8 +44,102 @@ const CONFLICT_OPTIONS = [
   { value: 'overwrite', label: 'Overwrite', title: 'Replace the existing tag with the new number' },
 ]
 
-const plan = computed(() => buildPlan(snapshot.value, settings))
+// --- Row edits (excluded sections, custom cues): per track, for this session only ---
+
+const editsByTrack = reactive({})
+const trackKey = computed(() => snapshot.value?.track?.path ?? '')
+const edits = computed(() => editsByTrack[trackKey.value] ?? NO_EDITS)
+
+function editableEdits() {
+  return (editsByTrack[trackKey.value] ??= { off: {}, custom: {} })
+}
+
+const plan = computed(() => buildPlan(snapshot.value, settings, edits.value))
 const counts = computed(() => summarize(plan.value))
+const hasEdits = computed(() => counts.value.off + counts.value.custom > 0)
+
+function setOff(row, off) {
+  const e = editableEdits()
+  if (off) e.off[String(row.beat)] = true
+  else delete e.off[String(row.beat)]
+}
+
+// A skipped row (existing tag kept) is not written anyway, so its checkbox is inactive;
+// typing a custom cue there turns it into Replace and makes it toggleable.
+const toggleable = (row) => row.action !== 'skip'
+const toggleableRows = computed(() => plan.value.rows.filter(toggleable))
+
+// Shift+click toggles every row between the last clicked one and this one.
+let lastToggled = null
+function toggleRow(row, included, event) {
+  const rows = plan.value.rows
+  const index = rows.indexOf(row)
+  const anchor = event?.shiftKey && lastToggled !== null ? rows.findIndex((r) => r.beat === lastToggled) : -1
+  const [from, to] = anchor >= 0 ? [Math.min(anchor, index), Math.max(anchor, index)] : [index, index]
+  for (let i = from; i <= to; i++) {
+    if (toggleable(rows[i])) setOff(rows[i], !included)
+  }
+  lastToggled = row.beat
+}
+
+const allIncluded = computed(() => toggleableRows.value.every((r) => r.action !== 'off'))
+const someIncluded = computed(() => toggleableRows.value.some((r) => r.action !== 'off'))
+// With any section off, the first click turns all of them back on.
+function toggleAll() {
+  const turnOff = allIncluded.value
+  for (const row of toggleableRows.value) setOff(row, turnOff)
+}
+
+function resetEdits() {
+  delete editsByTrack[trackKey.value]
+  lastToggled = null
+}
+
+// Inline editing of the New cue cell. Enter or leaving the cell saves, Esc cancels,
+// an empty value returns the row to the automatic number.
+const editingBeat = ref(null)
+const draft = ref('')
+const draftInvalid = computed(() => {
+  const text = draft.value.trim()
+  return text !== '' && (!parseCue(text) || text.length > CUE_MAX_LENGTH)
+})
+
+function startEdit(row) {
+  if (row.action === 'off') return
+  editingBeat.value = row.beat
+  draft.value = row.action === 'skip' ? row.existing ?? '' : row.text
+  nextTick(() => {
+    const input = document.querySelector('.cue-input')
+    input?.focus()
+    input?.select()
+  })
+}
+
+function commitEdit(row) {
+  if (editingBeat.value !== row.beat) return
+  if (draftInvalid.value) return
+  const text = draft.value.trim()
+  const e = editableEdits()
+  const key = String(row.beat)
+  // Unchanged text keeps the row automatic (for a skipped row that is the kept tag).
+  const shown = row.action === 'skip' ? row.existing : row.text
+  if (text === '' || (!row.custom && text === shown)) delete e.custom[key]
+  else e.custom[key] = text
+  editingBeat.value = null
+}
+
+function cancelEdit() {
+  editingBeat.value = null
+}
+
+function onEditBlur(row) {
+  if (draftInvalid.value) cancelEdit()
+  else commitEdit(row)
+}
+
+function resetCustom(row) {
+  delete editableEdits().custom[String(row.beat)]
+}
 const toWrite = computed(() => counts.value.create + counts.value.overwrite)
 const fps = computed(() => snapshot.value?.fps ?? 30)
 const tc = (seconds) => formatTimecode(seconds, fps.value)
@@ -58,17 +153,18 @@ const canApply = computed(() =>
 const rangeHint = computed(() => {
   const s = snapshot.value
   if (!s?.track) return ''
+  // Kept to one line (the hint is single-line), so the controls below never jump.
   if ((settings.rangeMode === 'selection' || settings.rangeMode === 'playhead') && !s.track.isGui) {
-    return `${GUI_ONLY}. Choose Sections or Whole track`
+    return GUI_ONLY
   }
   switch (settings.rangeMode) {
     case 'selection':
-      if (!s.selection) return 'Select a time range or layers on the timeline and press Refresh'
-      return `${s.selection.source === 'timeline' ? 'Timeline range' : `${s.selection.count} layers`}: ${beatToTc(s.selection.startBeat)} - ${beatToTc(s.selection.endBeat)}`
+      if (!s.selection) return 'Select a range or layers on the timeline'
+      return `${s.selection.source === 'timeline' ? 'Range' : `${s.selection.count} layers`}: ${beatToTc(s.selection.startBeat)} - ${beatToTc(s.selection.endBeat)}`
     case 'playhead': {
       if (!s.sections.length) return ''
       const i = sectionIndexAt(s.sections, s.playheadBeat)
-      return `From section ${i + 1} (${tc(s.sections[i].seconds)}) to the end of the track`
+      return `Section ${i + 1} (${tc(s.sections[i].seconds)}) to the end`
     }
     case 'track':
       return `Sections 1 to ${s.sections.length}`
@@ -98,7 +194,7 @@ const previousHint = computed(() => {
 const startDisabled = computed(() => settings.numberMode === 'continue' && !!plan.value.previousCue)
 const startInvalid = computed(() => !startDisabled.value && !parseCue(settings.startNumber))
 const sequenceHint = computed(() => {
-  const rows = plan.value.rows.filter((r) => r.action !== 'skip')
+  const rows = plan.value.rows.filter((r) => isWritten(r) && !r.custom)
   if (!rows.length) return ''
   return 'Next: ' + rows.slice(0, 3).map((r) => r.text).join(', ') + (rows.length > 3 ? ', ...' : '')
 })
@@ -118,10 +214,10 @@ function takePlayheadSection(field) {
 
 // --- Apply ---
 
-const ACTION_LABELS = { new: 'New', overwrite: 'Replace', skip: 'Skip' }
+const ACTION_LABELS = { new: 'New', overwrite: 'Replace', skip: 'Skip', off: 'Off' }
 
 function writableRows(p) {
-  return p.rows.filter((r) => r.action !== 'skip').map((r) => ({ beat: r.beat, text: r.text, overwrite: r.action === 'overwrite' }))
+  return p.rows.filter(isWritten).map((r) => ({ beat: r.beat, text: r.text, overwrite: r.action === 'overwrite' }))
 }
 
 async function apply() {
@@ -130,7 +226,7 @@ async function apply() {
   try {
     // Re-read the track right before writing: the timeline may have changed since the preview.
     const fresh = await refresh()
-    const freshPlan = buildPlan(fresh, settings)
+    const freshPlan = buildPlan(fresh, settings, edits.value)
     const rows = writableRows(freshPlan)
     if (freshPlan.errors.length || JSON.stringify(rows) !== shown) {
       showToast('The track changed in Designer. Check the preview and press again', 'error')
@@ -172,7 +268,7 @@ async function apply() {
             />
           </FormRow>
         </div>
-        <p class="hint">{{ rangeHint }}</p>
+        <p class="hint one-line" :title="rangeHint">{{ rangeHint }}</p>
 
         <FormRow label="Every Nth section" hint="1 tags every section, 2 every other one">
           <NumberStepper v-model="settings.every" :min="1" :invalid="!(settings.every >= 1)" aria-label="Every Nth section" />
@@ -220,23 +316,78 @@ async function apply() {
         <table v-if="plan.rows.length" class="plan-table">
           <thead>
             <tr>
+              <th class="check">
+                <CheckBox
+                  :model-value="allIncluded"
+                  :partial="someIncluded"
+                  aria-label="Include all sections"
+                  title="Include or exclude all sections"
+                  @toggle="toggleAll"
+                />
+              </th>
               <th class="num">Section</th>
               <th class="col-time">Time</th>
               <th class="col-time">Current</th>
               <th>New cue</th>
-              <th>Action</th>
+              <th class="col-action">Action</th>
             </tr>
           </thead>
           <tbody>
             <tr v-for="row in plan.rows" :key="row.beat" :class="row.action">
+              <td class="check">
+                <CheckBox
+                  :model-value="toggleable(row) && row.action !== 'off'"
+                  :disabled="!toggleable(row)"
+                  :aria-label="`Include section ${row.section}`"
+                  :title="toggleable(row) ? 'Include this section. Shift+click for a range' : 'Section already has a cue and is skipped'"
+                  @toggle="(value, event) => toggleRow(row, value, event)"
+                />
+              </td>
               <td class="num">{{ row.section }}</td>
               <td class="meta">{{ tc(row.seconds) }}</td>
               <td class="meta">{{ row.existing ?? '-' }}</td>
               <td class="cue">
-                <span v-if="row.action === 'skip'" class="meta">-</span>
-                <span v-else :class="{ error: row.tooLong }">{{ row.text }}</span>
-                <span v-if="row.duplicate" class="flag warn" title="This number already exists on the track">duplicate</span>
-                <span v-if="row.tooLong && row.action !== 'skip'" class="flag err">over {{ CUE_MAX_LENGTH }} chars</span>
+                <input
+                  v-if="editingBeat === row.beat"
+                  v-model="draft"
+                  class="cue-input"
+                  :class="{ invalid: draftInvalid }"
+                  :maxlength="CUE_MAX_LENGTH"
+                  :aria-invalid="draftInvalid"
+                  aria-label="Custom cue"
+                  spellcheck="false"
+                  autocomplete="off"
+                  @keydown.enter.prevent="commitEdit(row)"
+                  @keydown.esc.prevent="cancelEdit"
+                  @blur="onEditBlur(row)"
+                />
+                <template v-else>
+                  <span v-if="row.action === 'off'" class="meta">-</span>
+                  <button
+                    v-else
+                    type="button"
+                    class="cue-value"
+                    :class="{ custom: row.custom, error: row.tooLong || row.invalid, kept: row.action === 'skip' }"
+                    title="Click to type a custom cue"
+                    @click="startEdit(row)"
+                  >
+                    {{ row.action === 'skip' ? '-' : row.text }}
+                    <span v-if="row.custom" class="custom-mark" aria-label="custom">&#9670;</span>
+                  </button>
+                  <button
+                    v-if="row.custom"
+                    type="button"
+                    class="icon-btn reset"
+                    title="Back to the automatic number"
+                    aria-label="Back to the automatic number"
+                    @click="resetCustom(row)"
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 1 0 2.34-5.66 M4 4v5h5" /></svg>
+                  </button>
+                  <span v-if="row.duplicate" class="flag warn" title="This number already exists on the track">duplicate</span>
+                  <span v-if="row.tooLong && isWritten(row)" class="flag err">over {{ CUE_MAX_LENGTH }} chars</span>
+                  <span v-else-if="row.invalid" class="flag err">format X.Y.Z</span>
+                </template>
               </td>
               <td><span class="badge" :class="row.action">{{ ACTION_LABELS[row.action] }}</span></td>
             </tr>
@@ -257,8 +408,11 @@ async function apply() {
             <span>New: <b>{{ counts.create }}</b></span>
             <span v-if="counts.overwrite">Replace: <b>{{ counts.overwrite }}</b></span>
             <span v-if="counts.skip">Skip: <b>{{ counts.skip }}</b></span>
+            <span v-if="counts.off">Off: <b>{{ counts.off }}</b></span>
+            <span v-if="counts.custom" class="status-warn">Custom: {{ counts.custom }}</span>
             <span v-if="counts.duplicates" class="status-warn">Duplicates: {{ counts.duplicates }}</span>
           </template>
+          <button v-if="hasEdits" type="button" class="link-btn" title="Include all sections and drop custom cues" @click="resetEdits">Reset edits</button>
           <span v-for="note in plan.notes" :key="note" class="status-note">{{ note }}</span>
         </div>
         <button type="button" class="btn-primary" :disabled="!canApply" @click="apply">
@@ -302,6 +456,15 @@ async function apply() {
 }
 .hint:empty {
   display: none;
+}
+/* Always one line tall, also when empty, so switching modes does not move the rows below. */
+.hint.one-line,
+.hint.one-line:empty {
+  display: block;
+  min-height: 1.4em;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 .icon-btn {
   flex: none;
@@ -365,8 +528,10 @@ async function apply() {
   overflow-y: auto;
   padding: 0 16px 12px;
 }
+/* Fixed layout: widths come from the header, so editing a cell never moves the columns. */
 .plan-table {
   width: 100%;
+  table-layout: fixed;
   border-collapse: collapse;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
@@ -400,12 +565,28 @@ async function apply() {
 .plan-table tr.skip td {
   opacity: 0.55;
 }
+.plan-table tr.off td:not(.check) {
+  opacity: 0.4;
+}
+.plan-table .check {
+  width: 36px;
+  padding: 0 4px 0 10px;
+}
+.check > * {
+  vertical-align: middle;
+}
 .num {
   width: 64px;
   color: #9c9c9c;
 }
 .col-time {
   width: 120px;
+}
+.col-action {
+  width: 110px;
+}
+.plan-table .cue {
+  overflow: hidden;
 }
 .meta {
   color: #9c9c9c;
@@ -414,8 +595,77 @@ async function apply() {
   color: #f2f2f2;
   font-weight: 600;
 }
-.cue .error {
+.cue > * {
+  vertical-align: middle;
+}
+.cue-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 64px;
+  height: 24px;
+  margin-left: -7px;
+  padding: 0 6px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: #f2f2f2;
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: text;
+  transition: all 0.2s ease;
+}
+.cue-value:hover {
+  border-color: #3a3a3a;
+  background: #181818;
+}
+.cue-value:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px #0a84ff;
+}
+.cue-value.kept {
+  color: #9c9c9c;
+  font-weight: 400;
+}
+.cue-value.custom {
+  color: #ffd60a;
+}
+.cue-value.error {
   color: #ef4444;
+}
+.custom-mark {
+  font-size: 9px;
+  color: #ffd60a;
+}
+.cue-input {
+  width: 110px;
+  height: 24px;
+  margin-left: -7px;
+  padding: 0 6px;
+  background: #181818;
+  border: 1px solid #0a84ff;
+  border-radius: 4px;
+  color: #ffffff;
+  font: inherit;
+  font-weight: 600;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.3);
+}
+.cue-input:focus {
+  outline: none;
+}
+.cue-input.invalid {
+  border-color: #ef4444;
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.25);
+}
+.icon-btn.reset {
+  display: inline-grid;
+  margin: 0 0 0 2px;
+  opacity: 0;
+}
+tr:hover .icon-btn.reset,
+.icon-btn.reset:focus-visible {
+  opacity: 1;
 }
 .flag {
   margin-left: 8px;
@@ -446,7 +696,8 @@ async function apply() {
   border: 1px solid rgba(255, 214, 10, 0.55);
   color: #ffd60a;
 }
-.badge.skip {
+.badge.skip,
+.badge.off {
   background: #2a2a2a;
   color: #888888;
 }
@@ -495,6 +746,26 @@ async function apply() {
   color: #888888;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.link-btn {
+  flex: none;
+  padding: 0;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  color: #d4d4d4;
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  transition: color 0.2s ease;
+}
+.link-btn:hover {
+  color: #f2f2f2;
+}
+.link-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px #0a84ff;
 }
 .btn-primary {
   flex: none;

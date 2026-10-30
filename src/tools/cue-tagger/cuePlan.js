@@ -48,8 +48,13 @@ export function resolveRange(snapshot, settings) {
   return { error: 'Unknown range mode' }
 }
 
-// Builds the full list of tags to write. Pure function: same snapshot and settings give the same plan.
-export function buildPlan(snapshot, settings) {
+// Per-row edits from the preview, keyed by String(section beat) so they survive range changes:
+// off[key] = true excludes the section, custom[key] = text sets the cue by hand.
+export const NO_EDITS = Object.freeze({ off: {}, custom: {} })
+
+// Builds the full list of tags to write. Pure function: same inputs give the same plan.
+// Excluded sections and custom cues do not take a number: the auto sequence runs on without them.
+export function buildPlan(snapshot, settings, edits = NO_EDITS) {
   const plan = { rows: [], errors: [], notes: [], previousCue: null, range: null }
   if (!snapshot) return plan
   if (!snapshot.track) {
@@ -98,18 +103,30 @@ export function buildPlan(snapshot, settings) {
 
   for (const section of targets) {
     const existing = cueAtBeat.get(section.beat) ?? null
+    const key = String(section.beat)
+    const base = { section: section.index, beat: section.beat, seconds: section.seconds, existing, custom: false, invalid: false, tooLong: false, duplicate: false }
+
+    if (edits.off[key]) {
+      plan.rows.push({ ...base, text: '', action: 'off' })
+      continue
+    }
+    const customText = edits.custom[key]
+    if (customText != null) {
+      // A cue typed by hand is always written, also over an existing tag.
+      plan.rows.push({
+        ...base,
+        text: customText,
+        action: existing === null ? 'new' : 'overwrite',
+        custom: true,
+        invalid: !parseCue(customText),
+        tooLong: customText.length > CUE_MAX_LENGTH,
+      })
+      continue
+    }
+
     const text = formatCue(current)
     const action = existing === null ? 'new' : settings.conflict === 'overwrite' ? 'overwrite' : 'skip'
-    plan.rows.push({
-      section: section.index,
-      beat: section.beat,
-      seconds: section.seconds,
-      existing,
-      text,
-      action,
-      tooLong: text.length > CUE_MAX_LENGTH,
-      duplicate: false,
-    })
+    plan.rows.push({ ...base, text, action, tooLong: text.length > CUE_MAX_LENGTH })
     if (action !== 'skip') {
       current = incrementCue(current, settings.level, step)
     } else if (settings.numberMode === 'continue') {
@@ -124,15 +141,22 @@ export function buildPlan(snapshot, settings) {
   const replaced = new Set(plan.rows.filter((r) => r.action === 'overwrite').map((r) => r.beat))
   const used = new Set(snapshot.cues.filter((c) => !replaced.has(c.beat)).map((c) => c.text))
   for (const row of plan.rows) {
-    if (row.action === 'skip') continue
+    if (!isWritten(row)) continue
     row.duplicate = used.has(row.text)
     used.add(row.text)
   }
 
-  if (plan.rows.some((r) => r.action !== 'skip' && r.tooLong)) {
+  if (plan.rows.some((r) => isWritten(r) && r.invalid)) {
+    plan.errors.push('Custom cue format: X, X.Y or X.Y.Z')
+  }
+  if (plan.rows.some((r) => isWritten(r) && r.tooLong)) {
     plan.errors.push(`Cue number longer than ${CUE_MAX_LENGTH} characters`)
   }
   return plan
+}
+
+export function isWritten(row) {
+  return row.action === 'new' || row.action === 'overwrite'
 }
 
 export function summarize(plan) {
@@ -141,6 +165,8 @@ export function summarize(plan) {
     create: count('new'),
     overwrite: count('overwrite'),
     skip: count('skip'),
+    off: count('off'),
+    custom: plan.rows.filter((r) => r.custom).length,
     duplicates: plan.rows.filter((r) => r.duplicate).length,
   }
 }

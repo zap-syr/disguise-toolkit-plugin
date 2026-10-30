@@ -87,6 +87,77 @@ export function summarize(list) {
   }
 }
 
+// --- Fill selected rows from a template ---
+
+export const DEFAULT_FILL = {
+  template: 'Panel {n}',
+  start: 1,
+  step: 1,
+  digits: 1,
+  existing: 'overwrite', // 'overwrite' | 'skip'
+}
+
+export const FILL_TOKENS = [
+  { token: '{n}', title: 'Counter: Start, Step, Digits' },
+  { token: '{s}', title: 'Section number' },
+  { token: '{cue}', title: 'CUE tag at the note; rows without a tag are skipped' },
+  { token: '{text}', title: 'Current note text; rows without a note are skipped' },
+]
+
+export function fillErrors(settings) {
+  const errors = []
+  if (!normalizeNote(settings.template)) errors.push('Template is empty')
+  if (!Number.isInteger(settings.start)) errors.push('Start must be a whole number')
+  if (!Number.isInteger(settings.step)) errors.push('Step must be a whole number')
+  if (!(settings.digits >= 1 && settings.digits <= 6)) errors.push('Digits: 1 to 6')
+  return errors
+}
+
+// Texts for the given rows (in beat order). Skipped rows do not take a number, so the counter has
+// no gaps. A row is skipped when a {cue} / {text} it uses is empty: "GO {cue}" without a tag
+// would leave a bare "GO". Returns [{ row, text }] for the rows to change.
+export function buildFill(rows, settings, cues = []) {
+  if (fillErrors(settings).length) return []
+  const cueAt = new Map(cues.map((c) => [c.beat, c.text]))
+  const usesCue = settings.template.includes('{cue}')
+  const usesText = settings.template.includes('{text}')
+  const result = []
+  let n = settings.start
+  for (const row of rows) {
+    const shown = row.action === 'remove' ? '' : row.text
+    if (settings.existing === 'skip' && shown) continue
+    if ((usesCue && !cueAt.get(row.beat)) || (usesText && !shown)) continue
+    const counter = String(Math.abs(n)).padStart(settings.digits, '0')
+    const text = normalizeNote(
+      settings.template.replace(/\{(n|s|cue|text)\}/g, (_, token) => {
+        if (token === 'n') return (n < 0 ? '-' : '') + counter
+        if (token === 's') return row.section ?? ''
+        if (token === 'cue') return cueAt.get(row.beat) ?? ''
+        return shown
+      }),
+    )
+    if (!text) continue
+    result.push({ row, text })
+    n += settings.step
+  }
+  return result
+}
+
+// --- Find and replace (literal, case-insensitive like the filter) ---
+
+export function buildReplace(rows, find, replacement) {
+  const needle = find.trim()
+  if (!needle) return []
+  const pattern = new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi')
+  const result = []
+  for (const row of rows) {
+    if (row.action === 'remove' || !pattern.test(row.text)) continue
+    pattern.lastIndex = 0
+    result.push({ row, text: normalizeNote(row.text.replace(pattern, () => replacement)) })
+  }
+  return result
+}
+
 // Draft keys with nothing left to do: the Designer text already equals the typed one (e.g. after
 // Apply, or an edit reverted by hand). Conflicts stay until the user resolves them.
 export function settledKeys(snapshot, draft) {

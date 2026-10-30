@@ -387,7 +387,7 @@ async function apply() {
   <div class="note-editor">
     <div class="toolbar">
       <div class="filter">
-        <TextField v-model="filter" :placeholder="replaceOpen ? 'Find' : 'Filter notes'" :aria-label="replaceOpen ? 'Find' : 'Filter notes'" />
+        <TextField v-model="filter" clearable :placeholder="replaceOpen ? 'Find' : 'Filter notes'" :aria-label="replaceOpen ? 'Find' : 'Filter notes'" />
       </div>
       <button
         type="button"
@@ -402,7 +402,7 @@ async function apply() {
       </button>
       <template v-if="replaceOpen">
         <div class="filter">
-          <TextField v-model="replacement" placeholder="Replace with" aria-label="Replace with" />
+          <TextField v-model="replacement" clearable placeholder="Replace with" aria-label="Replace with" />
         </div>
         <button
           type="button"
